@@ -1,58 +1,61 @@
 from django.shortcuts import render
-from .forms import CSVUploadForm
-from .models import CSVFile
+from django.core.files.storage import FileSystemStorage
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import os
-from django.conf import settings
+import io
+import base64
 
-# Function to generate histograms for numerical columns
-def generate_histogram(data, column_name):
-    plt.figure(figsize=(10, 6))
-    sns.histplot(data[column_name], kde=True)
-    plt.title(f'Distribution of {column_name}')
-    plt.xlabel(column_name)
-    plt.ylabel('Frequency')
-    
-    # Save the plot as an image file
-    plot_path = os.path.join(settings.MEDIA_ROOT, f'{column_name}_histogram.png')
-    plt.savefig(plot_path)
-    plt.close()
-    
-    return plot_path
-
-# Main view function to handle file upload and processing
 def upload_file(request):
-    if request.method == 'POST':
-        form = CSVUploadForm(request.POST, request.FILES)
-        if form.is_valid():
-            # Save the uploaded file
-            csv_file = form.save()
-            
-            # Read the CSV file into a DataFrame
-            data = pd.read_csv(csv_file.file.path)
-            
-            # Perform data analysis
-            data_head = data.head()
-            summary_stats = data.describe()
-            missing_values = data.isnull().sum()
+    if request.method == 'POST' and request.FILES['csv_file']:
+        csv_file = request.FILES['csv_file']
+        fs = FileSystemStorage()
+        filename = fs.save(csv_file.name, csv_file)
+        uploaded_file_url = fs.url(filename)
+        
+        # Load CSV data into DataFrame
+        data = pd.read_csv(fs.path(filename))
+        
+        # Data analysis
+        first_rows = data.head().to_html(classes='table table-striped')
+        summary_stats = data.describe().to_html(classes='table table-striped')
+        
+        # Handling missing values - Convert Series to DataFrame
+        missing_values = data.isnull().sum().reset_index()
+        missing_values.columns = ['Column', 'Missing Values']
+        missing_values = missing_values.to_html(classes='table table-striped')
 
-            # Generate visualizations
-            histograms = []
-            for column in data.select_dtypes(include='number').columns:
-                histograms.append(generate_histogram(data, column))
+        # Filter numerical columns for correlation heatmap
+        numeric_data = data.select_dtypes(include='number')
+        
+        plots = []
+        if not numeric_data.empty:
+            # Correlation heatmap
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(numeric_data.corr(), annot=True, cmap='coolwarm')
+            plt.title('Correlation Heatmap')
+            plots.append(get_plot_base64(plt))
 
-            # Add results and plots to the context
-            context = {
-                'data_head': data_head.to_html(),
-                'summary_stats': summary_stats.to_html(),
-                'missing_values': missing_values.to_html(),
-                'histograms': histograms,  # List of file paths to histogram images
-            }
+            # Histograms for numerical columns
+            for column in numeric_data.columns:
+                plt.figure(figsize=(8, 6))
+                sns.histplot(data[column], kde=True)
+                plt.title(f'Histogram of {column}')
+                plots.append(get_plot_base64(plt))
 
-            return render(request, 'analysis/result.html', context)
-    else:
-        form = CSVUploadForm()
-    
-    return render(request, 'analysis/upload.html', {'form': form})
+        context = {
+            'first_rows': first_rows,
+            'summary_stats': summary_stats,
+            'missing_values': missing_values,
+            'plots': plots
+        }
+        
+        return render(request, 'analysis/results.html', context)
+    return render(request, 'analysis/upload.html')
+
+def get_plot_base64(plt):
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close()
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode('utf-8')
